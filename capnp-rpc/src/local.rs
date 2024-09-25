@@ -85,14 +85,19 @@ struct Results {
     message: Option<message::Builder<message::HeapAllocator>>,
     cap_table: Vec<Option<Box<dyn ClientHook>>>,
     results_done_fulfiller: Option<oneshot::Sender<Box<dyn ResultsDoneHook>>>,
+    pipeline_sender: Option<crate::queued::PipelineInnerSender>,
 }
 
 impl Results {
-    fn new(fulfiller: oneshot::Sender<Box<dyn ResultsDoneHook>>) -> Self {
+    fn new(
+        fulfiller: oneshot::Sender<Box<dyn ResultsDoneHook>>,
+        pipeline_sender: crate::queued::PipelineInnerSender,
+    ) -> Self {
         Self {
             message: Some(::capnp::message::Builder::new_default()),
             cap_table: Vec::new(),
             results_done_fulfiller: Some(fulfiller),
+            pipeline_sender: Some(pipeline_sender),
         }
     }
 }
@@ -126,6 +131,25 @@ impl ResultsHook for Results {
         }
     }
 
+    fn set_pipeline(&mut self) -> capnp::Result<()> {
+        use ::capnp::traits::ImbueMut;
+        let root = self.get()?;
+        let size = root.target_size()?;
+        let mut message2 = capnp::message::Builder::new(
+            capnp::message::HeapAllocator::new().first_segment_words(size.word_count as u32 + 1),
+        );
+        let mut root2: capnp::any_pointer::Builder = message2.init_root();
+        let mut cap_table2 = vec![];
+        root2.imbue_mut(&mut cap_table2);
+        root2.set_as(root.into_reader())?;
+        let hook = Box::new(ResultsDone::new(message2, cap_table2)) as Box<dyn ResultsDoneHook>;
+        let Some(sender) = self.pipeline_sender.take() else {
+            return Err(Error::failed("set_pipeline() called twice".into()));
+        };
+        sender.complete(Box::new(Pipeline::new(hook)));
+        Ok(())
+    }
+
     fn tail_call(self: Box<Self>, _request: Box<dyn RequestHook>) -> Promise<(), Error> {
         unimplemented!()
     }
@@ -147,12 +171,12 @@ struct ResultsDoneInner {
     cap_table: Vec<Option<Box<dyn ClientHook>>>,
 }
 
-struct ResultsDone {
+pub(crate) struct ResultsDone {
     inner: Rc<ResultsDoneInner>,
 }
 
 impl ResultsDone {
-    fn new(
+    pub(crate) fn new(
         message: message::Builder<message::HeapAllocator>,
         cap_table: Vec<Option<Box<dyn ClientHook>>>,
     ) -> Self {
@@ -181,6 +205,8 @@ pub struct Request {
     interface_id: u64,
     method_id: u16,
     client: Box<dyn ClientHook>,
+    pipeline: crate::queued::Pipeline,
+    pipeline_sender: crate::queued::PipelineInnerSender,
 }
 
 impl Request {
@@ -190,12 +216,15 @@ impl Request {
         _size_hint: Option<::capnp::MessageSize>,
         client: Box<dyn ClientHook>,
     ) -> Self {
+        let (pipeline_sender, pipeline) = crate::queued::Pipeline::new();
         Self {
             message: message::Builder::new_default(),
             cap_table: Vec::new(),
             interface_id,
             method_id,
             client,
+            pipeline,
+            pipeline_sender,
         }
     }
 }
@@ -217,16 +246,16 @@ impl RequestHook for Request {
             interface_id,
             method_id,
             client,
+            mut pipeline,
+            pipeline_sender,
         } = tmp;
         let params = Params::new(message, cap_table);
 
         let (results_done_fulfiller, results_done_promise) =
             oneshot::channel::<Box<dyn ResultsDoneHook>>();
         let results_done_promise = results_done_promise.map_err(crate::canceled_to_error);
-        let results = Results::new(results_done_fulfiller);
+        let results = Results::new(results_done_fulfiller, pipeline_sender.weak_clone());
         let promise = client.call(interface_id, method_id, Box::new(params), Box::new(results));
-
-        let (pipeline_sender, mut pipeline) = crate::queued::Pipeline::new();
 
         let p = futures::future::try_join(promise, results_done_promise).and_then(
             move |((), results_done_hook)| {
@@ -249,6 +278,14 @@ impl RequestHook for Request {
             promise: Promise::from_future(left),
             pipeline,
         }
+    }
+    fn send_streaming(self: Box<Self>) -> Promise<(), Error> {
+        // Local client gets no special handling for streaming, because there is no
+        // network latency to compensate for.
+        Promise::from_future(async {
+            let _ = self.send().promise.await?;
+            Ok(())
+        })
     }
     fn tail_send(self: Box<Self>) -> Option<(u32, Promise<(), Error>, Box<dyn PipelineHook>)> {
         unimplemented!()
@@ -303,6 +340,10 @@ where
     S: capability::Server,
 {
     inner: Rc<RefCell<S>>,
+
+    /// If a streaming call on this capability has returned an error,
+    /// this contains a copy of that error.
+    broken_error: Rc<RefCell<Option<Error>>>,
 }
 
 impl<S> Client<S>
@@ -312,11 +353,15 @@ where
     pub fn new(server: S) -> Self {
         Self {
             inner: Rc::new(RefCell::new(server)),
+            broken_error: Rc::new(RefCell::new(None)),
         }
     }
 
     pub fn from_rc(inner: Rc<RefCell<S>>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            broken_error: Rc::new(RefCell::new(None)),
+        }
     }
 }
 
@@ -327,6 +372,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            broken_error: self.broken_error.clone(),
         }
     }
 }
@@ -359,11 +405,17 @@ where
         params: Box<dyn ParamsHook>,
         results: Box<dyn ResultsHook>,
     ) -> Promise<(), Error> {
+        let streaming_error = self.broken_error.clone();
+        if let Some(e) = &*streaming_error.borrow() {
+            // Previous streaming call threw, so everything fails from now on.
+            return Promise::err(e.clone());
+        }
+
         // We don't want to actually dispatch the call synchronously, because we don't want the callee
         // to have any side effects before the promise is returned to the caller.  This helps avoid
         // race conditions.
         //
-        // TODO: actually use some kind of queue here to guarantee that call order in maintained.
+        // TODO: actually use some kind of queue here to guarantee that call order is maintained.
         // This currently relies on the task scheduler being first-in-first-out.
         let inner = self.inner.clone();
         Promise::from_future(async move {
@@ -378,7 +430,11 @@ where
                     ::capnp::capability::Results::new(results),
                 )
             };
-            f.await
+            let result = f.promise.await;
+            if let (true, Err(e)) = (f.is_streaming, &result) {
+                *streaming_error.borrow_mut() = Some(e.clone());
+            }
+            result
         })
     }
 

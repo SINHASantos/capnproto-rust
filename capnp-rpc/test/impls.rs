@@ -21,13 +21,14 @@
 
 use crate::test_capnp::{
     bootstrap, test_call_order, test_capability_server_set, test_extends, test_handle,
-    test_interface, test_more_stuff, test_pipeline,
+    test_interface, test_more_stuff, test_pipeline, test_promise_resolve, test_streaming,
 };
 
-use capnp::capability::Promise;
+use capnp::capability::{FromClientHook, Promise};
 use capnp::Error;
 use capnp_rpc::pry;
 
+use futures::channel::oneshot;
 use futures::{FutureExt, TryFutureExt};
 
 use std::cell::{Cell, RefCell};
@@ -111,6 +112,17 @@ impl bootstrap::Server for Bootstrap {
         results
             .get()
             .set_cap(capnp_rpc::new_client(TestCapabilityServerSet::new()));
+        Promise::ok(())
+    }
+
+    fn test_promise_resolve(
+        &mut self,
+        _params: bootstrap::TestPromiseResolveParams,
+        mut results: bootstrap::TestPromiseResolveResults,
+    ) -> Promise<(), Error> {
+        results
+            .get()
+            .set_cap(capnp_rpc::new_client(TestPromiseResolveImpl {}));
         Promise::ok(())
     }
 }
@@ -261,13 +273,10 @@ impl test_pipeline::Server for TestPipeline {
 
             results.get().set_s("bar");
 
-            // TODO implement better casting
             results
                 .get()
                 .init_out_box()
-                .set_cap(test_interface::Client {
-                    client: capnp_rpc::new_client::<test_extends::Client, _>(TestExtends).client,
-                });
+                .set_cap(capnp_rpc::new_client::<test_extends::Client, _>(TestExtends).cast_to());
             Ok(())
         }))
     }
@@ -278,6 +287,19 @@ impl test_pipeline::Server for TestPipeline {
         _results: test_pipeline::GetNullCapResults,
     ) -> Promise<(), Error> {
         Promise::ok(())
+    }
+
+    fn get_cap_pipeline_only(
+        &mut self,
+        _params: test_pipeline::GetCapPipelineOnlyParams,
+        mut results: test_pipeline::GetCapPipelineOnlyResults,
+    ) -> Promise<(), Error> {
+        results
+            .get()
+            .init_out_box()
+            .set_cap(capnp_rpc::new_client::<test_extends::Client, _>(TestExtends).cast_to());
+        pry!(results.set_pipeline());
+        Promise::from_future(::futures::future::pending())
     }
 }
 
@@ -531,6 +553,17 @@ impl test_more_stuff::Server for TestMoreStuff {
 
         Promise::from_future(::futures::future::try_join_all(results).map_ok(|_| ()))
     }
+
+    fn get_test_streaming(
+        &mut self,
+        _params: test_more_stuff::GetTestStreamingParams,
+        mut results: test_more_stuff::GetTestStreamingResults,
+    ) -> Promise<(), Error> {
+        results
+            .get()
+            .set_cap(capnp_rpc::new_client(TestStreamingImpl::new()));
+        Promise::ok(())
+    }
 }
 
 struct Handle {
@@ -554,12 +587,12 @@ impl Drop for Handle {
 impl test_handle::Server for Handle {}
 
 pub struct TestCapDestructor {
-    fulfiller: Option<::futures::channel::oneshot::Sender<()>>,
+    fulfiller: Option<oneshot::Sender<()>>,
     imp: TestInterface,
 }
 
 impl TestCapDestructor {
-    pub fn new(fulfiller: ::futures::channel::oneshot::Sender<()>) -> Self {
+    pub fn new(fulfiller: oneshot::Sender<()>) -> Self {
         Self {
             fulfiller: Some(fulfiller),
             imp: TestInterface::new(),
@@ -598,6 +631,47 @@ impl test_interface::Server for TestCapDestructor {
         _results: test_interface::BazResults,
     ) -> Promise<(), Error> {
         Promise::err(Error::unimplemented("bar is not implemented".to_string()))
+    }
+}
+
+#[derive(Default)]
+pub struct TestStreamingImpl {
+    i_sum: u32,
+    j_sum: u32,
+}
+
+impl TestStreamingImpl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl test_streaming::Server for TestStreamingImpl {
+    fn do_stream_i(&mut self, params: test_streaming::DoStreamIParams) -> Promise<(), Error> {
+        let params = pry!(params.get());
+        if params.get_throw_error() {
+            return Promise::err(Error::failed("throw requested".to_string()));
+        }
+        self.i_sum += params.get_i();
+        Promise::ok(())
+    }
+    fn do_stream_j(&mut self, params: test_streaming::DoStreamJParams) -> Promise<(), Error> {
+        let params = pry!(params.get());
+        if params.get_throw_error() {
+            return Promise::err(Error::failed("throw requested".to_string()));
+        }
+        self.j_sum += params.get_j();
+        Promise::ok(())
+    }
+    fn finish_stream(
+        &mut self,
+        _params: test_streaming::FinishStreamParams,
+        mut results: test_streaming::FinishStreamResults,
+    ) -> Promise<(), Error> {
+        let mut results = results.get();
+        results.set_total_i(self.i_sum);
+        results.set_total_j(self.j_sum);
+        Promise::ok(())
     }
 }
 
@@ -654,5 +728,58 @@ impl test_capability_server_set::Server for TestCapabilityServerSet {
             }
             Ok(())
         })
+    }
+}
+
+pub struct ResolverImpl {
+    sender: Option<oneshot::Sender<test_interface::Client>>,
+}
+
+impl test_promise_resolve::resolver::Server for ResolverImpl {
+    fn resolve_to_another_promise(
+        &mut self,
+        _params: test_promise_resolve::resolver::ResolveToAnotherPromiseParams,
+        _results: test_promise_resolve::resolver::ResolveToAnotherPromiseResults,
+    ) -> Promise<(), Error> {
+        let Some(sender) = self.sender.take() else {
+            return Promise::err(Error::failed("no sender".into()));
+        };
+        let (snd, rcv) = oneshot::channel();
+        let _ = sender.send(capnp_rpc::new_future_client(
+            rcv.map_err(|_| Error::failed("oneshot was canceled".to_string())),
+        ));
+        self.sender = Some(snd);
+        Promise::ok(())
+    }
+
+    fn resolve_to_cap(
+        &mut self,
+        _params: test_promise_resolve::resolver::ResolveToCapParams,
+        _results: test_promise_resolve::resolver::ResolveToCapResults,
+    ) -> Promise<(), Error> {
+        let Some(sender) = self.sender.take() else {
+            return Promise::err(Error::failed("no sender".into()));
+        };
+        let _ = sender.send(capnp_rpc::new_client(TestInterface::new()));
+        Promise::ok(())
+    }
+}
+
+pub struct TestPromiseResolveImpl {}
+
+impl test_promise_resolve::Server for TestPromiseResolveImpl {
+    fn foo(
+        &mut self,
+        _params: test_promise_resolve::FooParams,
+        mut results: test_promise_resolve::FooResults,
+    ) -> Promise<(), Error> {
+        let (snd, rcv) = oneshot::channel();
+        let resolver = ResolverImpl { sender: Some(snd) };
+        let mut results_root = results.get();
+        results_root.set_cap(capnp_rpc::new_future_client(
+            rcv.map_err(|_| Error::failed("oneshot was canceled".to_string())),
+        ));
+        results_root.set_resolver(capnp_rpc::new_client(resolver));
+        Promise::ok(())
     }
 }

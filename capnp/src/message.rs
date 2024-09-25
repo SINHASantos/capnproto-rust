@@ -294,6 +294,10 @@ where
     pub fn into_typed<T: Owned>(self) -> TypedReader<S, T> {
         TypedReader::new(self)
     }
+
+    pub fn size_in_words(&self) -> usize {
+        self.arena.size_in_words()
+    }
 }
 
 /// A message reader whose value is known to be of type `T`.
@@ -360,6 +364,7 @@ where
 }
 
 /// An object that allocates memory for a Cap'n Proto message as it is being built.
+///
 /// Users of capnproto-rust who wish to provide memory in non-standard ways should
 /// implement this trait. Objects implementing this trait are intended to be wrapped
 /// by `capnp::private::BuilderArena`, which handles calling the methods at the appropriate
@@ -403,15 +408,17 @@ where
     arena: BuilderArenaImpl<A>,
 }
 
-unsafe impl<A> Send for Builder<A> where A: Send + Allocator {}
-
 fn _assert_kinds() {
     fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
     fn _assert_reader<S: ReaderSegments + Send>() {
         _assert_send::<Reader<S>>();
     }
-    fn _assert_builder<A: Allocator + Send>() {
+    fn _assert_builder_send<A: Allocator + Send>() {
         _assert_send::<Builder<A>>();
+    }
+    fn _assert_builder_sync<A: Allocator + Sync>() {
+        _assert_sync::<Builder<A>>();
     }
 }
 
@@ -518,6 +525,10 @@ where
     /// segments.
     pub fn into_allocator(self) -> A {
         self.arena.into_allocator()
+    }
+
+    pub fn size_in_words(&self) -> usize {
+        self.arena.size_in_words()
     }
 }
 

@@ -45,6 +45,8 @@ pub trait ReaderArena {
 
     fn nesting_limit(&self) -> i32;
 
+    fn size_in_words(&self) -> usize;
+
     // TODO(apibump): Consider putting extract_cap(), inject_cap(), drop_cap() here
     //   and on message::Reader. Then we could get rid of Imbue and ImbueMut, and
     //   layout::StructReader, layout::ListReader, etc. could drop their `cap_table` fields.
@@ -146,6 +148,16 @@ where
     fn nesting_limit(&self) -> i32 {
         self.nesting_limit
     }
+
+    fn size_in_words(&self) -> usize {
+        let mut result = 0;
+        for ii in 0..self.segments.len() {
+            if let Some(seg) = self.segments.get_segment(ii as u32) {
+                result += seg.len();
+            }
+        }
+        result
+    }
 }
 
 pub trait BuilderArena: ReaderArena {
@@ -234,6 +246,11 @@ where
 {
     inner: BuilderArenaImplInner<A>,
 }
+
+// BuilderArenaImpl has no interior mutability. Adding these impls
+// allows message::Builder<A> to be Send and/or Sync when appropriate.
+unsafe impl<A> Send for BuilderArenaImpl<A> where A: Send + Allocator {}
+unsafe impl<A> Sync for BuilderArenaImpl<A> where A: Sync + Allocator {}
 
 impl<A> BuilderArenaImpl<A>
 where
@@ -332,6 +349,14 @@ where
 
     fn nesting_limit(&self) -> i32 {
         0x7fffffff
+    }
+
+    fn size_in_words(&self) -> usize {
+        let mut result = 0;
+        for ii in 0..self.inner.segments.len() {
+            result += self.inner.segments[ii].allocated as usize
+        }
+        result
     }
 }
 
@@ -463,5 +488,9 @@ impl ReaderArena for NullArena {
 
     fn nesting_limit(&self) -> i32 {
         0x7fffffff
+    }
+
+    fn size_in_words(&self) -> usize {
+        0
     }
 }

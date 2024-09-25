@@ -1,3 +1,24 @@
+## v0.20.2
+- Add `new_future_client()` and deprecate `new_promise_client()`.
+
+## v0.20.1
+- Fill in `unimplemented!()` block to handle case when an export promise resolves to another
+  promise.
+
+## v0.20.0
+- Add support for streaming RPC methods.
+
+## v0.19.5
+- Add support for `Request::set_pipeline()`.
+
+## v0.19.4
+- Use the `noFinishNeeded` field to elide Finish messages when possible.
+
+## v0.19.3
+- Remove some unneeded fields in Answer and Import.
+- Use `let else` to improve readability.
+- Use a tighter size_hint estimate for Resolve messages.
+
 ## v0.19.2
 - Use size hint in new_outgoing_message(). Should improve performance somewhat.
 

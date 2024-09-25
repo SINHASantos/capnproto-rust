@@ -33,6 +33,7 @@ pub trait RequestHook {
     fn get(&mut self) -> any_pointer::Builder<'_>;
     fn get_brand(&self) -> usize;
     fn send(self: alloc::boxed::Box<Self>) -> RemotePromise<any_pointer::Owned>;
+    fn send_streaming(self: alloc::boxed::Box<Self>) -> Promise<(), crate::Error>;
     fn tail_send(
         self: alloc::boxed::Box<Self>,
     ) -> Option<(
@@ -92,6 +93,9 @@ impl Clone for alloc::boxed::Box<dyn ClientHook> {
 
 pub trait ResultsHook {
     fn get(&mut self) -> crate::Result<any_pointer::Builder<'_>>;
+
+    fn set_pipeline(&mut self) -> crate::Result<()>;
+
     fn allow_cancellation(&self);
     fn tail_call(
         self: alloc::boxed::Box<Self>,

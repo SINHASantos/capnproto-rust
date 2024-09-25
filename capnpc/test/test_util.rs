@@ -87,35 +87,20 @@ pub fn init_test_message(mut builder: test_all_types::Builder<'_>) {
             .set_u_int16_list(&[1234, 5678, 0, 0xffff])
             .unwrap();
 
-        {
-            let mut uint32_list = sub_builder.reborrow().init_u_int32_list(4);
-            uint32_list.set(0, 12345678);
-            uint32_list.set(1, 90123456);
-            uint32_list.set(2, 0);
-            uint32_list.set(3, 0xffffffff);
-        }
-
-        {
-            let mut uint64_list = sub_builder.reborrow().init_u_int64_list(4);
-            uint64_list.set(0, 123456789012345);
-            uint64_list.set(1, 678901234567890);
-            uint64_list.set(2, 0);
-            uint64_list.set(3, 0xffffffffffffffff);
-        }
+        sub_builder
+            .set_u_int32_list(&[12345678, 90123456, 0, 0xffffffff])
+            .unwrap();
+        sub_builder
+            .set_u_int64_list(&[123456789012345, 678901234567890, 0, 0xffffffffffffffff])
+            .unwrap();
 
         sub_builder
             .set_float32_list(&[0f32, 1234567f32, 1e37, -1e37, 1e-37, -1e-37])
             .unwrap();
 
-        {
-            let mut float64_list = sub_builder.reborrow().init_float64_list(6);
-            float64_list.set(0, 0f64);
-            float64_list.set(1, 123456789012345f64);
-            float64_list.set(2, 1e306);
-            float64_list.set(3, -1e306);
-            float64_list.set(4, 1e-306);
-            float64_list.set(5, -1e-306);
-        }
+        sub_builder
+            .set_float64_list(&[0f64, 123456789012345f64, 1e306, -1e306, 1e-306, -1e-306])
+            .unwrap();
 
         // ...
         {
@@ -142,13 +127,7 @@ pub fn init_test_message(mut builder: test_all_types::Builder<'_>) {
 
     builder.reborrow().init_void_list(6);
 
-    {
-        let mut bool_list = builder.reborrow().init_bool_list(4);
-        bool_list.set(0, true);
-        bool_list.set(1, false);
-        bool_list.set(2, false);
-        bool_list.set(3, true);
-    }
+    builder.set_bool_list(&[true, false, false, true]).unwrap();
 
     // ...
 
@@ -430,6 +409,76 @@ pub fn dynamic_init_test_message(mut builder: ::capnp::dynamic_struct::Builder<'
         substruct.set_named("boolField", true.into()).unwrap();
         substruct.set_named("int8Field", (-12i8).into()).unwrap();
         substruct.set_named("int16Field", (3456i16).into()).unwrap();
+        substruct
+            .set_named("int32Field", (-78901234i32).into())
+            .unwrap();
+        substruct
+            .set_named("int64Field", (56789012345678i64).into())
+            .unwrap();
+        substruct.set_named("uInt8Field", (90u8).into()).unwrap();
+        substruct
+            .set_named("uInt16Field", (1234u16).into())
+            .unwrap();
+        substruct
+            .set_named("uInt32Field", (56789012u32).into())
+            .unwrap();
+        substruct
+            .set_named("uInt64Field", (345678901234567890u64).into())
+            .unwrap();
+        substruct
+            .set_named("float32Field", (-1.25e-10f32).into())
+            .unwrap();
+        substruct
+            .set_named("float64Field", (345f64).into())
+            .unwrap();
+        substruct.set_named("textField", "baz".into()).unwrap();
+        substruct.set_named("dataField", b"qux"[..].into()).unwrap();
+        {
+            let mut subsubstruct = substruct
+                .reborrow()
+                .init_named("structField")
+                .unwrap()
+                .downcast::<::capnp::dynamic_struct::Builder<'_>>();
+            subsubstruct
+                .set_named("textField", "nested".into())
+                .unwrap();
+            subsubstruct
+                .init_named("structField")
+                .unwrap()
+                .downcast::<::capnp::dynamic_struct::Builder<'_>>()
+                .set_named("textField", "really nested".into())
+                .unwrap();
+        }
+        substruct
+            .set_named("enumField", TestEnum::Baz.into())
+            .unwrap();
+
+        substruct.reborrow().initn_named("voidList", 3).unwrap();
+
+        {
+            let mut bool_list = substruct
+                .reborrow()
+                .initn_named("boolList", 5)
+                .unwrap()
+                .downcast::<::capnp::dynamic_list::Builder<'_>>();
+            bool_list.set(0, false.into()).unwrap();
+            bool_list.set(1, true.into()).unwrap();
+            bool_list.set(2, false.into()).unwrap();
+            bool_list.set(3, true.into()).unwrap();
+            bool_list.set(4, true.into()).unwrap();
+        }
+
+        {
+            let mut int8_list = substruct
+                .reborrow()
+                .initn_named("int8List", 4)
+                .unwrap()
+                .downcast::<::capnp::dynamic_list::Builder<'_>>();
+            int8_list.set(0, 12i8.into()).unwrap();
+            int8_list.set(1, (-34i8).into()).unwrap();
+            int8_list.set(2, (-0x80i8).into()).unwrap();
+            int8_list.set(3, (0x7fi8).into()).unwrap();
+        }
     }
     builder
         .set_named("enumField", TestEnum::Corge.into())

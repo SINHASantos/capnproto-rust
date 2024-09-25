@@ -99,6 +99,7 @@ macro_rules! pry {
 
 mod attach;
 mod broken;
+mod flow_control;
 mod local;
 mod queued;
 mod reconnect;
@@ -121,17 +122,23 @@ pub trait OutgoingMessage {
     /// Same as `get_body()`, but returns the corresponding reader type.
     fn get_body_as_reader(&self) -> ::capnp::Result<::capnp::any_pointer::Reader>;
 
-    /// Sends the message. Returns a promise for the message that resolves once the send has completed.
+    /// Sends the message. Returns a promise that resolves once the send has completed.
     /// Dropping the returned promise does *not* cancel the send.
     fn send(
         self: Box<Self>,
     ) -> (
-        Promise<Rc<message::Builder<message::HeapAllocator>>, Error>,
+        Promise<(), Error>,
         Rc<message::Builder<message::HeapAllocator>>,
     );
 
     /// Takes the inner message out of `self`.
     fn take(self: Box<Self>) -> ::capnp::message::Builder<::capnp::message::HeapAllocator>;
+
+    /// Gets the total size of the message, for flow control purposes. Although the caller
+    /// could also call get_body().target_size(0, doing that would walk th emessage tree,
+    /// whereas typical implementations can compute the size more cheaply by summing
+    /// segment sizes.
+    fn size_in_words(&self) -> usize;
 }
 
 /// A message received from a [`VatNetwork`].
@@ -164,9 +171,30 @@ pub trait Connection<VatId> {
     /// returns None. If any other problem occurs, returns an Error.
     fn receive_incoming_message(&mut self) -> Promise<Option<Box<dyn IncomingMessage>>, Error>;
 
+    /// Constructs a flow controller for a new stream on this connection.
+    ///
+    /// Returns (fc, p), where fc is the new flow controller and p is a promise
+    /// that must be polled in order to drive the flow controller.
+    fn new_stream(&mut self) -> (Box<dyn FlowController>, Promise<(), Error>) {
+        let (fc, f) = crate::flow_control::FixedWindowFlowController::new(
+            crate::flow_control::DEFAULT_WINDOW_SIZE,
+        );
+        (Box::new(fc), f)
+    }
+
     /// Waits until all outgoing messages have been sent, then shuts down the outgoing stream. The
     /// returned promise resolves after shutdown is complete.
     fn shutdown(&mut self, result: ::capnp::Result<()>) -> Promise<(), Error>;
+}
+
+/// Tracks a particular RPC stream in order to implement a flow control algorithm.
+pub trait FlowController {
+    fn send(
+        &mut self,
+        message: Box<dyn OutgoingMessage>,
+        ack: Promise<(), Error>,
+    ) -> Promise<(), Error>;
+    fn wait_all_acked(&mut self) -> Promise<(), Error>;
 }
 
 /// Network facility between vats, it determines how to form connections between
@@ -356,6 +384,8 @@ where
     )))
 }
 
+/// Collection of unwrappable capabilities.
+///
 /// Allows a server to recognize its own capabilities when passed back to it, and obtain the
 /// underlying Server objects associated with them. Holds only weak references to Server objects
 /// allowing Server objects to be dropped when dropped by the remote client. Call the `gc` method
@@ -432,7 +462,7 @@ where
 
 /// Converts a promise for a client into a client that queues up any calls that arrive
 /// before the promise resolves.
-// TODO: figure out a better way to allow construction of promise clients.
+#[deprecated(since = "0.20.2", note = "use `new_future_client()` instead")]
 pub fn new_promise_client<T, F>(client_promise: F) -> T
 where
     T: ::capnp::capability::FromClientHook,
@@ -445,6 +475,28 @@ where
     queued_client.drive(client_promise.then(move |r| {
         if let Some(queued_inner) = weak_client.upgrade() {
             crate::queued::ClientInner::resolve(&queued_inner, r.map(|c| c.hook));
+        }
+        Promise::ok(())
+    }));
+
+    T::new(Box::new(queued_client))
+}
+
+/// Creates a `Client` from a future that resolves to a `Client`.
+///
+/// Any calls that arrive before the resolution are accumulated in a queue.
+pub fn new_future_client<T>(
+    client_future: impl ::futures::Future<Output = Result<T, Error>> + 'static,
+) -> T
+where
+    T: ::capnp::capability::FromClientHook,
+{
+    let mut queued_client = crate::queued::Client::new(None);
+    let weak_client = Rc::downgrade(&queued_client.inner);
+
+    queued_client.drive(client_future.then(move |r| {
+        if let Some(queued_inner) = weak_client.upgrade() {
+            crate::queued::ClientInner::resolve(&queued_inner, r.map(|c| c.into_client_hook()));
         }
         Promise::ok(())
     }));

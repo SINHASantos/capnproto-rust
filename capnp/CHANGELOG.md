@@ -1,3 +1,16 @@
+## v0.20.1
+- Add support for downcasting dynamic values to fully concrete list and
+  struct types.
+
+## v0.20.0
+- Add trait hook support for streaming RPC methods.
+- Add `unsafe impl Sync` to BuilderArenaImpl.
+- Move `unsafe impl Send` from message::Builder to BuilderArenaImpl.
+- Fix misspelled error variant: UnexepectedFarPointer -> UnexpectedFarPointer.
+
+## v0.19.7
+- Add `Results::set_pipeline()` and `ResultsHook::set_pipeline()`.
+
 ## v0.19.6
 - Fix ExactSizeIterator implementations so that they return the number of
   remaining elements instead of the total length of the underlying list.
