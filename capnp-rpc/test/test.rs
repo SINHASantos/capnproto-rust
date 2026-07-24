@@ -1318,6 +1318,37 @@ fn get_self() {
 }
 
 #[test]
+fn broken_cap_returns_supplied_error() {
+    let error = Error::failed("membrane denied access".to_string());
+
+    futures::executor::block_on(async move {
+        // A broken capability, cast to a concrete interface type.
+        let client = test_capnp::test_interface::Client {
+            client: capnp_rpc::new_broken_cap(error.clone()),
+        };
+
+        // A direct method call fails with the supplied error.
+        let e = client.foo_request().send().promise.await.err().unwrap();
+        assert_eq!(e.extra, error.extra);
+
+        // Pipelined access through a broken call also fails with the error.
+        let pipeline_client = test_capnp::test_pipeline::Client {
+            client: capnp_rpc::new_broken_cap(error.clone()),
+        };
+        let promise = pipeline_client.get_cap_request().send();
+        let pipelined_cap = promise.pipeline.get_out_box().get_cap();
+        let e = pipelined_cap
+            .foo_request()
+            .send()
+            .promise
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.extra, error.extra);
+    });
+}
+
+#[test]
 fn reimport_then_resend_does_not_poison_downcast_map() {
     // Regression test: receiving a senderHosted descriptor for an import we
     // already hold used to construct a second wrapper `Client`, overwriting
